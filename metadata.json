@@ -1,0 +1,8 @@
+{
+  "name": "Remix دفتر القيود",
+  "description": "تطبيق محاسبي لتحويل الفواتير وشيفتات المبيعات وملفات PDF والإكسيل إلى قيود يومية وتصدير XLSX",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

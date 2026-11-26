@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">دفتر القيود</string>
+    <string name="nav_ledger">الدفتر</string>
+    <string name="nav_intake">إدخال وتحليل</string>
+    <string name="nav_directory">الدليل</string>
+    <string name="nav_export">التصدير</string>
+
+    <string name="action_export_xlsx">تصدير إكسيل XLSX</string>
+    <string name="action_share_xlsx">مشاركة ملف الإكسيل</string>
+    <string name="action_save_entry">حفظ في الدفتر</string>
+    <string name="action_cancel">إلغاء</string>
+    <string name="action_add_line">إضافة سطر قيد</string>
+    <string name="action_auto_balance">موازنة القيد</string>
+    <string name="action_analyze_now">تحليل وتوليد القيود</string>
+    <string name="action_import_excel">استيراد إكسيل / بيانات</string>
+
+    <string name="error_timeout">انتهت مهلة التحليل (60 ثانية). يرجى المحاولة مرة أخرى.</string>
+    <string name="error_empty_response">لم يقم النموذج بإرجاع بيانات صالحة.</string>
+    <string name="error_unbalanced">تنبيه: إجمالي المدين لا يساوي إجمالي الدائن.</string>
+</resources>
