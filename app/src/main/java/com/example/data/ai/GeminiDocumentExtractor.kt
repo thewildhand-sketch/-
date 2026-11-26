@@ -1,29 +1,23 @@
 package com.example.data.ai
 
 import android.graphics.Bitmap
-import android.util.Base64
 import android.util.Log
-import com.example.BuildConfig
 import com.example.data.local.JournalEntryEntity
 import com.example.data.local.MasterRecordEntity
 import com.example.domain.DoubleEntryGenerator
 import com.example.model.JournalSourceType
 import com.example.model.MasterEntityType
-import java.io.ByteArrayOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
+import com.google.firebase.Firebase
+import com.google.firebase.ai.ai
+import com.google.firebase.ai.type.Schema
+import com.google.firebase.ai.type.content
+import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import org.json.JSONArray
 import org.json.JSONObject
 
 private const val TAG = "GeminiDocExtractor"
-private const val GEMINI_MODEL = "gemini-2.5-flash"
-private const val GEMINI_ENDPOINT =
-    "https://generativelanguage.googleapis.com/v1beta/models/$GEMINI_MODEL:generateContent"
 
 data class ExtractedDocumentDraft(
     val summaryTitle: String,
@@ -33,100 +27,81 @@ data class ExtractedDocumentDraft(
 
 class GeminiDocumentExtractor {
 
-    private fun requireApiKey(): String {
-        val key = BuildConfig.GEMINI_API_KEY.trim()
-        if (key.isEmpty() ||
-            key == "GEMINI_API_KEY_DEFAULT_VALUE" ||
-            key == "YOUR_GEMINI_API_KEY"
-        ) {
-            throw IllegalStateException(
-                "مفتاح GEMINI_API_KEY غير مهيأ. أضف مفتاح Gemini API في لوحة Secrets داخل AI Studio للمتابعة."
+    private val journalLineSchema = Schema.obj(
+        properties = mapOf(
+            "mainAccountName" to Schema.string("Main account name matched from master list when available"),
+            "subAccountName" to Schema.string("Sub account name matched from master list when available"),
+            "transName" to Schema.string("Transaction type name (Trans. Name)"),
+            "description" to Schema.string("Clear Arabic description (بيان) for this journal line"),
+            "debit" to Schema.double("Debit amount (>= 0)"),
+            "credit" to Schema.double("Credit amount (>= 0)"),
+        )
+    )
+
+    private val documentSchema = Schema.obj(
+        properties = mapOf(
+            "documentType" to Schema.string("One of: purchase_invoice, sales_shift, payment_cheque, received_cheque, return_note, general_entry"),
+            "summaryTitle" to Schema.string("Concise Arabic title summarizing party, invoice/shift number, and total"),
+            "date" to Schema.string("Document date in YYYY-MM-DD format"),
+            "invoiceNum" to Schema.string("Invoice number if present"),
+            "shiftNum" to Schema.string("Sales shift number if present"),
+            "supplierName" to Schema.string("Exact supplier name from master list if present"),
+            "supplierCode" to Schema.string("Supplier code if known"),
+            "supplierCategory" to Schema.string("Supplier classification if known"),
+            "customerName" to Schema.string("Exact customer name from master list if present"),
+            "customerCode" to Schema.string("Customer code if known"),
+            "branchName" to Schema.string("Branch name if present"),
+            "branchCode" to Schema.string("Branch code if known"),
+            "employeeName" to Schema.string("Employee or cashier name if present"),
+            "employeeCode" to Schema.string("Employee code if known"),
+            "bank" to Schema.string("Bank name if present"),
+            "chequeNum" to Schema.string("Cheque number if present"),
+            "dueDate" to Schema.string("Cheque due date YYYY-MM-DD if present"),
+            "condition" to Schema.string("Payment condition e.g. نقدي or آجل or فيزا or شيك"),
+            "salesTax2372" to Schema.double("Sales/VAT tax amount"),
+            "customerTax1357" to Schema.double("Customer tax amount"),
+            "withholdingTax1Pct2361" to Schema.double("1% withholding tax amount"),
+            "goodReturns" to Schema.double("Good returns amount"),
+            "damagedReturns" to Schema.double("Damaged returns amount"),
+            "discounts" to Schema.double("Discounts amount"),
+            "taxes" to Schema.double("Total taxes amount"),
+            "visaCount" to Schema.double("Count or total of Visa transactions"),
+            "visaNumber" to Schema.string("Visa slip or terminal number"),
+            "cashVariance" to Schema.double("Cash over/short variance (عجز / زيادة)"),
+            "notes" to Schema.string("Additional remarks in Arabic"),
+            "lines" to Schema.array(
+                items = journalLineSchema,
+                description = "Balanced double-entry lines where sum(debit) == sum(credit)"
+            ),
+        ),
+        optionalProperties = listOf(
+            "invoiceNum", "shiftNum", "supplierName", "supplierCode", "supplierCategory",
+            "customerName", "customerCode", "branchName", "branchCode", "employeeName",
+            "employeeCode", "bank", "chequeNum", "dueDate", "condition",
+            "salesTax2372", "customerTax1357", "withholdingTax1Pct2361",
+            "goodReturns", "damagedReturns", "discounts", "taxes",
+            "visaCount", "visaNumber", "cashVariance", "notes"
+        )
+    )
+
+    private val rootResponseSchema = Schema.obj(
+        properties = mapOf(
+            "documents" to Schema.array(
+                items = documentSchema,
+                description = "All distinct invoices, sales shifts, or cheques detected across the provided pages/images"
             )
-        }
-        return key
-    }
+        )
+    )
 
-    private fun buildResponseSchema(): JSONObject {
-        fun stringProp(description: String) = JSONObject()
-            .put("type", "STRING")
-            .put("description", description)
-
-        fun numberProp(description: String) = JSONObject()
-            .put("type", "NUMBER")
-            .put("description", description)
-
-        val lineProperties = JSONObject()
-            .put("mainAccountName", stringProp("Main account name matched from master list when available"))
-            .put("subAccountName", stringProp("Sub account name matched from master list when available"))
-            .put("transName", stringProp("Transaction type name (Trans. Name)"))
-            .put("description", stringProp("Clear Arabic description (بيان) for this journal line"))
-            .put("debit", numberProp("Debit amount (>= 0)"))
-            .put("credit", numberProp("Credit amount (>= 0)"))
-
-        val lineSchema = JSONObject()
-            .put("type", "OBJECT")
-            .put("properties", lineProperties)
-            .put(
-                "required",
-                JSONArray(listOf("mainAccountName", "subAccountName", "transName", "description", "debit", "credit"))
-            )
-
-        val docProperties = JSONObject()
-            .put("documentType", stringProp("One of: purchase_invoice, sales_shift, payment_cheque, received_cheque, return_note, general_entry"))
-            .put("summaryTitle", stringProp("Concise Arabic title summarizing party, invoice/shift number, and total"))
-            .put("date", stringProp("Document date in YYYY-MM-DD format"))
-            .put("invoiceNum", stringProp("Invoice number if present"))
-            .put("shiftNum", stringProp("Sales shift number if present"))
-            .put("supplierName", stringProp("Exact supplier name from master list if present"))
-            .put("supplierCode", stringProp("Supplier code if known"))
-            .put("supplierCategory", stringProp("Supplier classification if known"))
-            .put("customerName", stringProp("Exact customer name from master list if present"))
-            .put("customerCode", stringProp("Customer code if known"))
-            .put("branchName", stringProp("Branch name if present"))
-            .put("branchCode", stringProp("Branch code if known"))
-            .put("employeeName", stringProp("Employee or cashier name if present"))
-            .put("employeeCode", stringProp("Employee code if known"))
-            .put("bank", stringProp("Bank name if present"))
-            .put("chequeNum", stringProp("Cheque number if present"))
-            .put("dueDate", stringProp("Cheque due date YYYY-MM-DD if present"))
-            .put("condition", stringProp("Payment condition e.g. نقدي or آجل or فيزا or شيك"))
-            .put("salesTax2372", numberProp("Sales/VAT tax amount"))
-            .put("customerTax1357", numberProp("Customer tax amount"))
-            .put("withholdingTax1Pct2361", numberProp("1% withholding tax amount"))
-            .put("goodReturns", numberProp("Good returns amount"))
-            .put("damagedReturns", numberProp("Damaged returns amount"))
-            .put("discounts", numberProp("Discounts amount"))
-            .put("taxes", numberProp("Total taxes amount"))
-            .put("visaCount", numberProp("Count or total of Visa transactions"))
-            .put("visaNumber", stringProp("Visa slip or terminal number"))
-            .put("cashVariance", numberProp("Cash over/short variance (عجز / زيادة)"))
-            .put("notes", stringProp("Additional remarks in Arabic"))
-            .put(
-                "lines",
-                JSONObject()
-                    .put("type", "ARRAY")
-                    .put("description", "Balanced double-entry lines where sum(debit) == sum(credit)")
-                    .put("items", lineSchema)
-            )
-
-        val docSchema = JSONObject()
-            .put("type", "OBJECT")
-            .put("properties", docProperties)
-            .put("required", JSONArray(listOf("documentType", "summaryTitle", "date", "lines")))
-
-        return JSONObject()
-            .put("type", "OBJECT")
-            .put(
-                "properties",
-                JSONObject().put(
-                    "documents",
-                    JSONObject()
-                        .put("type", "ARRAY")
-                        .put("description", "All distinct invoices, sales shifts, or cheques detected across the provided pages/images")
-                        .put("items", docSchema)
-                )
-            )
-            .put("required", JSONArray(listOf("documents")))
+    private val model by lazy {
+        Firebase.ai.generativeModel(
+            modelName = "gemini-3.8-flash",
+            generationConfig = generationConfig {
+                responseMimeType = "application/json"
+                responseSchema = rootResponseSchema
+                temperature = 0.1f
+            }
+        )
     }
 
     suspend fun extractFromBitmaps(
@@ -137,32 +112,18 @@ class GeminiDocumentExtractor {
         sourceLabel: String,
     ): List<ExtractedDocumentDraft> {
         if (bitmaps.isEmpty()) return emptyList()
-        val apiKey = requireApiKey()
         val promptText = buildSystemPrompt(masterRecords)
-
         return try {
-            val jsonText = withTimeout(60_000L) {
-                withContext(Dispatchers.IO) {
-                    val parts = JSONArray().apply {
-                        put(JSONObject().put("text", promptText))
-                        bitmaps.forEach { bmp ->
-                            val baos = ByteArrayOutputStream()
-                            bmp.compress(Bitmap.CompressFormat.JPEG, 85, baos)
-                            val base64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
-                            put(
-                                JSONObject().put(
-                                    "inlineData",
-                                    JSONObject()
-                                        .put("mimeType", "image/jpeg")
-                                        .put("data", base64)
-                                )
-                            )
-                        }
+            val response = withTimeout(60_000L) {
+                model.generateContent(
+                    content {
+                        text(promptText)
+                        bitmaps.forEach { bmp -> image(bmp) }
                     }
-                    callGeminiRest(apiKey, parts)
-                }
+                )
             }
-            if (jsonText.isBlank()) {
+            val jsonText = response.text
+            if (jsonText.isNullOrBlank()) {
                 throw IllegalStateException("لم يُرجع نموذج الذكاء الاصطناعي أي بيانات من الصور.")
             }
             parseDocumentsJson(jsonText, startingOpNum, sourceType, sourceLabel)
@@ -184,19 +145,13 @@ class GeminiDocumentExtractor {
         sourceLabel: String = "نص مخصص",
     ): List<ExtractedDocumentDraft> {
         if (rawText.isBlank()) return emptyList()
-        val apiKey = requireApiKey()
         val promptText = buildSystemPrompt(masterRecords) + "\n\nالنص المراد تحويله لقيود يومية:\n" + rawText
-
         return try {
-            val jsonText = withTimeout(60_000L) {
-                withContext(Dispatchers.IO) {
-                    val parts = JSONArray().apply {
-                        put(JSONObject().put("text", promptText))
-                    }
-                    callGeminiRest(apiKey, parts)
-                }
+            val response = withTimeout(60_000L) {
+                model.generateContent(promptText)
             }
-            if (jsonText.isBlank()) {
+            val jsonText = response.text
+            if (jsonText.isNullOrBlank()) {
                 throw IllegalStateException("لم يُرجع نموذج الذكاء الاصطناعي أي بيانات.")
             }
             parseDocumentsJson(jsonText, startingOpNum, JournalSourceType.EXCEL_IMPORT, sourceLabel)
@@ -208,66 +163,6 @@ class GeminiDocumentExtractor {
         } catch (e: Exception) {
             Log.e(TAG, "Gemini text extraction failed", e)
             throw IllegalStateException(e.localizedMessage ?: "فشل تحويل النص إلى قيود.")
-        }
-    }
-
-    private fun callGeminiRest(apiKey: String, parts: JSONArray): String {
-        val payload = JSONObject()
-            .put(
-                "contents",
-                JSONArray().put(
-                    JSONObject()
-                        .put("role", "user")
-                        .put("parts", parts)
-                )
-            )
-            .put(
-                "generationConfig",
-                JSONObject()
-                    .put("temperature", 0.1)
-                    .put("responseMimeType", "application/json")
-                    .put("responseSchema", buildResponseSchema())
-            )
-
-        val connection = (URL(GEMINI_ENDPOINT).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            connectTimeout = 20_000
-            readTimeout = 55_000
-            doOutput = true
-            setRequestProperty("Content-Type", "application/json; charset=UTF-8")
-            setRequestProperty("x-goog-api-key", apiKey)
-        }
-
-        return try {
-            connection.outputStream.use { os ->
-                os.write(payload.toString().toByteArray(Charsets.UTF_8))
-            }
-
-            val statusCode = connection.responseCode
-            val stream = if (statusCode in 200..299) connection.inputStream else connection.errorStream
-            val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-
-            if (statusCode !in 200..299) {
-                val apiError = runCatching {
-                    JSONObject(body).optJSONObject("error")?.optString("message").orEmpty()
-                }.getOrDefault("")
-                val friendly = when (statusCode) {
-                    400 -> "طلب غير صالح لنموذج Gemini: ${apiError.ifBlank { body.take(160) }}"
-                    401, 403 -> "مفتاح Gemini API غير صالح أو لا يملك الصلاحية المطلوبة. تحقق من GEMINI_API_KEY في لوحة Secrets."
-                    429 -> "تم تجاوز حد الطلبات المؤقت لخدمة Gemini. حاول مرة أخرى بعد لحظات."
-                    else -> "خطأ من خدمة Gemini ($statusCode): ${apiError.ifBlank { body.take(160) }}"
-                }
-                throw IllegalStateException(friendly)
-            }
-
-            val responseJson = JSONObject(body)
-            val candidates = responseJson.optJSONArray("candidates")
-            val firstCandidate = candidates?.optJSONObject(0)
-            val content = firstCandidate?.optJSONObject("content")
-            val respParts = content?.optJSONArray("parts")
-            respParts?.optJSONObject(0)?.optString("text").orEmpty()
-        } finally {
-            connection.disconnect()
         }
     }
 

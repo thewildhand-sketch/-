@@ -42,6 +42,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.data.ai.configureAppCheck
 import com.example.data.local.AppDatabase
 import com.example.data.local.LedgerRepository
 import com.example.ui.IntakeUiState
@@ -68,6 +69,9 @@ enum class AppTab(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Mandatory Step 1: Configure Firebase App Check with launch intent before UI/ViewModels
+        configureAppCheck(this, intent)
 
         enableEdgeToEdge()
 
